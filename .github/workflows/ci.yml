@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: core + adapter unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: go vet (core)
+        run: go vet ./...
+      - name: go test (core)
+        run: go test -race ./...
+      - name: go vet (gorm adapter)
+        working-directory: adapters/gorm
+        run: go vet ./...
+      - name: go test (gorm adapter)
+        working-directory: adapters/gorm
+        run: go test -race ./...
+
+  sqlite:
+    name: integration (sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: go test (integration / sqlite)
+        working-directory: integration
+        run: go test -race -run TestSQLite ./...
+
+  postgres:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: audit
+          POSTGRES_PASSWORD: audit
+          POSTGRES_DB: audit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U audit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: go test (integration / postgres)
+        working-directory: integration
+        env:
+          GO_AUDIT_POSTGRES_DSN: postgres://audit:audit@localhost:5432/audit?sslmode=disable
+        run: go test -race -run TestPostgres ./...
+
+  mysql:
+    name: integration (mysql)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: audit
+          MYSQL_USER: audit
+          MYSQL_PASSWORD: audit
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: go test (integration / mysql)
+        working-directory: integration
+        env:
+          GO_AUDIT_MYSQL_DSN: audit:audit@tcp(127.0.0.1:3306)/audit?parseTime=true&multiStatements=true
+        run: go test -race -run TestMySQL ./...

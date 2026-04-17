@@ -1,0 +1,43 @@
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Test / coverage output
+coverage.txt
+coverage.html
+*.prof
+
+# Vendor (not used; core has zero deps)
+vendor/
+
+# Local build directories
+/bin/
+/dist/
+/tmp/
+
+# Environment files — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# plan package
+go-audit-plan.md
