@@ -3,7 +3,7 @@ module github.com/gopackx/go-audit/adapters/bun
 go 1.25.0
 
 require (
-	github.com/gopackx/go-audit v0.0.0
+	github.com/gopackx/go-audit v1.1.0
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/sqlitedialect v1.2.18
 	modernc.org/sqlite v1.48.2

@@ -3,7 +3,7 @@ module github.com/gopackx/go-audit/adapters/gorm
 go 1.22
 
 require (
-	github.com/gopackx/go-audit v0.0.0
+	github.com/gopackx/go-audit v1.1.0
 	gorm.io/gorm v1.25.12
 )
 
