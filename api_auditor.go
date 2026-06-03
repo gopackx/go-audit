@@ -18,11 +18,16 @@ func (p *apiAuditor) Record(ctx context.Context, entry APIEntry) error {
 	}
 	cfg := p.a.cfg.APIAudit
 
-	headers := redactHeaders(entry.RequestHeaders, cfg.RedactHeaders)
+	reqHeaders := redactHeaders(entry.RequestHeaders, cfg.RedactHeaders)
+	respHeaders := redactHeaders(entry.ResponseHeaders, cfg.RedactHeaders)
 	reqBody := redactBody(entry.RequestBody, cfg.RedactBodyFields)
 	respBody := redactBody(entry.ResponseBody, cfg.RedactBodyFields)
 
-	headersJSON, err := jsonMarshal(headers)
+	reqHeadersJSON, err := jsonMarshal(reqHeaders)
+	if err != nil {
+		return err
+	}
+	respHeadersJSON, err := jsonMarshal(respHeaders)
 	if err != nil {
 		return err
 	}
@@ -56,19 +61,20 @@ func (p *apiAuditor) Record(ctx context.Context, entry APIEntry) error {
 	}
 
 	row := AuditAPILog{
-		Service:        entry.Service,
-		Endpoint:       entry.Endpoint,
-		Method:         entry.Method,
-		StatusCode:     entry.StatusCode,
-		RequestHeaders: headersJSON,
-		RequestBody:    reqJSON,
-		ResponseBody:   respJSON,
-		DurationMs:     entry.DurationMs,
-		ErrorMessage:   entry.ErrorMessage,
-		UserID:         userID,
-		Metadata:       metaJSON,
-		TransactionID:  txID,
-		CreatedAt:      time.Now().UTC(),
+		Service:         entry.Service,
+		Endpoint:        entry.Endpoint,
+		Method:          entry.Method,
+		StatusCode:      entry.StatusCode,
+		RequestHeaders:  reqHeadersJSON,
+		ResponseHeaders: respHeadersJSON,
+		RequestBody:     reqJSON,
+		ResponseBody:    respJSON,
+		DurationMs:      entry.DurationMs,
+		ErrorMessage:    entry.ErrorMessage,
+		UserID:          userID,
+		Metadata:        metaJSON,
+		TransactionID:   txID,
+		CreatedAt:       time.Now().UTC(),
 	}
 	return p.a.handleError(cfg.OnError,
 		p.a.store.SaveAPILog(ctx, cfg.Table, row),

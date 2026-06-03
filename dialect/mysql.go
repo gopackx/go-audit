@@ -37,6 +37,7 @@ func (MySQLDialect) CreateAPITableSQL(table string) string {
     method            VARCHAR(10) NOT NULL,
     status_code       INT,
     request_headers   JSON,
+    response_headers  JSON,
     request_body      JSON,
     response_body     JSON,
     duration_ms       INT,

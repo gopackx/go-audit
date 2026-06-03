@@ -32,6 +32,7 @@ func (SQLiteDialect) CreateAPITableSQL(table string) string {
     method            TEXT NOT NULL,
     status_code       INTEGER,
     request_headers   TEXT,
+    response_headers  TEXT,
     request_body      TEXT,
     response_body     TEXT,
     duration_ms       INTEGER,

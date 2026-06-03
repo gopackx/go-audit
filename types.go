@@ -24,17 +24,18 @@ type DataEntry struct {
 
 // APIEntry is the payload recorded for a third-party API call.
 type APIEntry struct {
-	Service        string
-	Endpoint       string
-	Method         string
-	StatusCode     int
-	RequestHeaders map[string]string
-	RequestBody    any
-	ResponseBody   any
-	DurationMs     int
-	ErrorMessage   string
-	Metadata       map[string]any
-	TransactionID  string
+	Service         string
+	Endpoint        string
+	Method          string
+	StatusCode      int
+	RequestHeaders  map[string]string
+	ResponseHeaders map[string]string
+	RequestBody     any
+	ResponseBody    any
+	DurationMs      int
+	ErrorMessage    string
+	Metadata        map[string]any
+	TransactionID   string
 }
 
 // RestoreResult holds the outcome of a Restore call.
@@ -52,9 +53,22 @@ type PurgeResult struct {
 }
 
 // jsonMarshal is a tiny helper so callers don't import encoding/json twice.
+// Returns a nil RawMessage for nil inputs *and* for typed-nil maps so callers
+// that hand us a `var m map[string]any` end up persisted as SQL NULL rather
+// than the literal JSON token "null".
 func jsonMarshal(v any) (json.RawMessage, error) {
 	if v == nil {
 		return nil, nil
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return nil, nil
+		}
+	case map[string]string:
+		if t == nil {
+			return nil, nil
+		}
 	}
 	b, err := json.Marshal(v)
 	if err != nil {

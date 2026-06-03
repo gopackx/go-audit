@@ -7,6 +7,7 @@ import (
 
 	"github.com/gopackx/go-audit"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -14,6 +15,11 @@ import (
 // GORM statement's Settings map. Using a dedicated struct type avoids string
 // collisions with other plugins.
 type oldValuesKey struct{}
+
+// seenRowsKey marks (entityType, entityID) pairs that have already been
+// recorded for the current statement so nested association inserts don't get
+// double-audited when GORM walks parent + child slices.
+type seenRowsKey struct{}
 
 type callbacks struct {
 	auditor audit.Auditor
@@ -83,8 +89,19 @@ func (c *callbacks) recordEach(db *gorm.DB, action string, old map[string]map[st
 		txID = audit.NewTransactionID()
 	}
 
+	// Per-statement dedup: GORM's nested-association inserts can iterate the
+	// same child row twice (once via the parent's ReflectValue walk, once via
+	// the dedicated association create callback). Track (entityType,
+	// entityID) pairs already emitted on this statement and skip repeats.
+	seen := loadOrInitSeen(db)
+
 	iterateRows(db, func(rv reflect.Value) {
 		entityID := primaryKeyString(db.Statement.Schema, rv)
+		seenKey := entityType + "\x00" + entityID
+		if _, dup := seen[seenKey]; dup {
+			return
+		}
+		seen[seenKey] = struct{}{}
 		values := fieldValues(db.Statement.Schema, rv)
 
 		var oldVals map[string]any
@@ -132,11 +149,15 @@ func snapshotRows(db *gorm.DB) (map[string]map[string]any, error) {
 	// Use Table+Clauses to mirror the caller's filter.
 	rowsModel := reflect.New(reflect.SliceOf(db.Statement.Schema.ModelType)).Interface()
 	q := sess.Table(db.Statement.Table)
-	if len(db.Statement.Clauses) > 0 {
-		for _, clause := range []string{"WHERE"} {
-			if c, ok := db.Statement.Clauses[clause]; ok {
-				q = q.Clauses(c)
-			}
+	// Re-apply the caller's WHERE conditions on the fresh session. Passing
+	// the original *clause.Clause back into q.Clauses(...) makes GORM emit
+	// "WHERE WHERE ..." (Postgres 42601) because the Clause carries its own
+	// "WHERE" name and the builder also prepends one. Extract the
+	// underlying clause.Where expression and wrap it in a fresh value so the
+	// builder writes a single WHERE.
+	if src, ok := db.Statement.Clauses["WHERE"]; ok {
+		if w, ok := src.Expression.(clause.Where); ok && len(w.Exprs) > 0 {
+			q = q.Clauses(clause.Where{Exprs: w.Exprs})
 		}
 	}
 	if err := q.Find(rowsModel).Error; err != nil {
@@ -150,6 +171,19 @@ func snapshotRows(db *gorm.DB) (map[string]map[string]any, error) {
 		out[id] = fieldValues(db.Statement.Schema, row)
 	}
 	return out, nil
+}
+
+// loadOrInitSeen returns the per-statement dedup set, creating and stashing
+// it on the statement's Settings on first call.
+func loadOrInitSeen(db *gorm.DB) map[string]struct{} {
+	if v, ok := db.Statement.Settings.Load(seenRowsKey{}); ok {
+		if m, ok := v.(map[string]struct{}); ok {
+			return m
+		}
+	}
+	m := map[string]struct{}{}
+	db.Statement.Settings.Store(seenRowsKey{}, m)
+	return m
 }
 
 // iterateRows invokes fn for each struct in the statement's ReflectValue

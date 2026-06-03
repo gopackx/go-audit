@@ -30,7 +30,10 @@ func redactHeaders(h map[string]string, keys []string) map[string]string {
 
 // redactBody walks body and replaces any map entry whose key appears in
 // fields (case-insensitive) with redactedMarker. Scalars are returned
-// unchanged; slices are walked recursively.
+// unchanged; slices are walked recursively. Structs and other non-map
+// payloads are normalized through a JSON round-trip first so callers can
+// pass typed request/response objects (per README example) without losing
+// redaction coverage.
 func redactBody(body any, fields []string) any {
 	if body == nil || len(fields) == 0 {
 		return body
@@ -39,7 +42,29 @@ func redactBody(body any, fields []string) any {
 	for _, k := range fields {
 		set[strings.ToLower(k)] = struct{}{}
 	}
-	return redactWalk(body, set)
+	switch body.(type) {
+	case map[string]any, []any:
+		return redactWalk(body, set)
+	case string, []byte, json.RawMessage,
+		bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		// Scalars can't contain redactable keys.
+		return body
+	}
+	// Structs, pointers, named maps, etc.: marshal → unmarshal into generic
+	// types so redactWalk can see the field names. If marshal fails we fall
+	// back to the original value rather than dropping the body entirely.
+	b, err := json.Marshal(body)
+	if err != nil {
+		return body
+	}
+	var generic any
+	if err := json.Unmarshal(b, &generic); err != nil {
+		return body
+	}
+	return redactWalk(generic, set)
 }
 
 func redactWalk(v any, fields map[string]struct{}) any {

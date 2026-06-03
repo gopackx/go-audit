@@ -30,9 +30,10 @@ type AuditAPILog struct {
 	Endpoint       string          `json:"endpoint"`
 	Method         string          `json:"method"`
 	StatusCode     int             `json:"status_code"`
-	RequestHeaders json.RawMessage `json:"request_headers,omitempty"`
-	RequestBody    json.RawMessage `json:"request_body,omitempty"`
-	ResponseBody   json.RawMessage `json:"response_body,omitempty"`
+	RequestHeaders  json.RawMessage `json:"request_headers,omitempty"`
+	ResponseHeaders json.RawMessage `json:"response_headers,omitempty"`
+	RequestBody     json.RawMessage `json:"request_body,omitempty"`
+	ResponseBody    json.RawMessage `json:"response_body,omitempty"`
 	DurationMs     int             `json:"duration_ms"`
 	ErrorMessage   string          `json:"error_message,omitempty"`
 	UserID         string          `json:"user_id,omitempty"`

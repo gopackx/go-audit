@@ -22,6 +22,15 @@ go get github.com/gopackx/go-audit/adapters/bun   # optional, for Bun users
 go get github.com/gopackx/go-audit/adapters/ent   # optional, for Ent users
 ```
 
+> **Adapter versions.** Adapter sub-modules are not (yet) released under
+> their own semver tags, so `go get .../adapters/gorm@v1.0.0` will fail.
+> Pin to the latest commit on `master` via a pseudo-version instead:
+>
+> ```bash
+> go get github.com/gopackx/go-audit/adapters/gorm@master
+> # go.mod will rewrite this to e.g. v0.0.0-20260101120000-abcdef012345
+> ```
+
 ## Quick start (GORM + SQLite)
 
 ```go
@@ -38,14 +47,18 @@ auditor, _ := audit.New(sqlDB, audit.Config{
         return ctx.Value("user_id").(string), "user"
     },
     DataAudit: audit.DataAuditConfig{
-        Enabled:       true,
-        ExcludeFields: []string{"password", "remember_token"},
+        Enabled:         true,
+        ExcludeFields:   []string{"password", "remember_token"},
+        ExcludeEntities: []string{"sessions", "audit_logs"}, // skip whole tables
+        SkipOldValues:   false,                              // see below
+        OnError:         audit.ErrorFailLoud,                // per-table, see below
     },
     APIAudit: audit.APIAuditConfig{
         Enabled:          true,
         RedactHeaders:    []string{"Authorization", "X-API-Key"},
         RedactBodyFields: []string{"password", "secret", "token"},
         MaxBodySize:      4096,
+        OnError:          audit.ErrorFailLoud, // independent from DataAudit
     },
 })
 
@@ -63,13 +76,15 @@ start := time.Now()
 resp, err := client.Transfer(ctx, req)
 
 _ = auditor.API().Record(ctx, audit.APIEntry{
-    Service:      "bca",
-    Endpoint:     "/api/v1/transfer",
-    Method:       "POST",
-    StatusCode:   resp.StatusCode,
-    RequestBody:  req,
-    ResponseBody: resp.Body,
-    DurationMs:   int(time.Since(start).Milliseconds()),
+    Service:         "bca",
+    Endpoint:        "/api/v1/transfer",
+    Method:          "POST",
+    StatusCode:      resp.StatusCode,
+    RequestHeaders:  reqHeaders,            // map[string]string
+    ResponseHeaders: respHeaders,           // map[string]string, redacted alongside RequestHeaders
+    RequestBody:     req,
+    ResponseBody:    resp.Body,
+    DurationMs:      int(time.Since(start).Milliseconds()),
 })
 ```
 
@@ -212,9 +227,56 @@ type Config struct {
 }
 ```
 
-`DataAuditConfig.ExcludeFields` drops sensitive columns from both `old_values`
-and `new_values` before they are persisted. `APIAuditConfig.MaxBodySize`
-truncates request / response bodies above the limit (default 4 KiB).
+### Data audit knobs
+
+| Field | Purpose |
+| --- | --- |
+| `ExcludeFields` | Column names dropped from both `old_values` and `new_values` (e.g. `password`, `remember_token`). |
+| `ExcludeEntities` | Entire tables to skip — useful for high-volume housekeeping tables (`sessions`, `jobs`) or to avoid recursively auditing the audit table itself. |
+| `SkipOldValues` | When `true` the adapter skips the pre-write `SELECT` snapshot used to populate `old_values` on UPDATE/DELETE. Trades audit completeness for one fewer round-trip per write. Same flag works for GORM, Bun and Ent. |
+| `OnError` | Per-table error policy — `ErrorFailLoud` (default) surfaces store failures back to the caller; `ErrorFailSilent` logs and swallows them. The `APIAudit` block has its own independent `OnError`, so you can fail-loud on data changes but fail-silent on API logging (or vice versa). |
+
+### API audit knobs
+
+`APIAuditConfig.MaxBodySize` truncates request / response bodies above the
+limit (default 4 KiB) into a `{ "_truncated": true, "original_size": N,
+"preview": "..." }` envelope so the column stays valid JSON.
+
+`RedactBodyFields` works on JSON-shaped payloads. If you hand the auditor a
+struct or pointer, go-audit round-trips it through `encoding/json` before
+walking the keys, so JSON tag names — not Go field names — are what the
+redaction list must match. Anything that can't be JSON-marshalled is left
+as-is.
+
+### Skipping the GORM plugin for a single call
+
+Sometimes you need to write through the same `*gorm.DB` without producing an
+audit row (bulk back-fills, migrations, or to avoid recursively auditing the
+audit table itself). Use GORM's standard `SkipHooks` session option — the
+adapter's callbacks are registered as ordinary GORM callbacks, so they
+honour it automatically:
+
+```go
+db.Session(&gorm.Session{SkipHooks: true}).Create(&bulkRows)
+```
+
+Pair this with `DataAudit.ExcludeEntities` when you want the bypass to be
+permanent for a table.
+
+### Production tip: dedicated `*sql.DB` for the audit store
+
+`audit.New(db, ...)` never opens or closes the connection — it borrows the
+`*sql.DB` you supply. In production we recommend giving the auditor its
+**own** `*sql.DB` (separate pool, often a separate user / database) rather
+than reusing the application pool. That way:
+
+* Audit writes don't compete with hot application queries for connections.
+* You can tighten `SetMaxOpenConns` / `SetConnMaxLifetime` to the audit
+  workload independently.
+* Granting the audit user `INSERT`-only on the audit tables limits blast
+  radius if the app is compromised.
+* Pointing the audit DB at a separate database or replica makes the
+  retention / purge job operationally independent from the main schema.
 
 ## Schema
 

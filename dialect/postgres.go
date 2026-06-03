@@ -32,6 +32,7 @@ func (PostgresDialect) CreateAPITableSQL(table string) string {
     method            VARCHAR(10) NOT NULL,
     status_code       INT,
     request_headers   JSONB,
+    response_headers  JSONB,
     request_body      JSONB,
     response_body     JSONB,
     duration_ms       INT,

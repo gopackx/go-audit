@@ -58,7 +58,7 @@ func (s *sqlStore) SaveDataLog(ctx context.Context, table string, log entry.Audi
 func (s *sqlStore) SaveAPILog(ctx context.Context, table string, log entry.AuditAPILog) error {
 	cols := []string{
 		"service", "endpoint", "method", "status_code",
-		"request_headers", "request_body", "response_body",
+		"request_headers", "response_headers", "request_body", "response_body",
 		"duration_ms", "error_message", "user_id",
 		"metadata", "transaction_id", "created_at",
 	}
@@ -70,7 +70,8 @@ func (s *sqlStore) SaveAPILog(ctx context.Context, table string, log entry.Audit
 		table, strings.Join(cols, ", "), strings.Join(ph, ", "))
 	_, err := s.db.ExecContext(ctx, stmt,
 		log.Service, log.Endpoint, log.Method, log.StatusCode,
-		nullableJSON(log.RequestHeaders), nullableJSON(log.RequestBody), nullableJSON(log.ResponseBody),
+		nullableJSON(log.RequestHeaders), nullableJSON(log.ResponseHeaders),
+		nullableJSON(log.RequestBody), nullableJSON(log.ResponseBody),
 		log.DurationMs, nullableString(log.ErrorMessage),
 		nullableString(log.UserID),
 		nullableJSON(log.Metadata),
@@ -184,7 +185,7 @@ func (s *sqlStore) QueryAPILogs(ctx context.Context, table string, f entry.APIFi
 		add("created_at <= ?", f.DateTo)
 	}
 
-	q := fmt.Sprintf("SELECT id, service, endpoint, method, status_code, request_headers, request_body, response_body, duration_ms, error_message, user_id, metadata, transaction_id, created_at FROM %s", table)
+	q := fmt.Sprintf("SELECT id, service, endpoint, method, status_code, request_headers, response_headers, request_body, response_body, duration_ms, error_message, user_id, metadata, transaction_id, created_at FROM %s", table)
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -205,12 +206,12 @@ func (s *sqlStore) QueryAPILogs(ctx context.Context, table string, f entry.APIFi
 	var out []entry.AuditAPILog
 	for rows.Next() {
 		var l entry.AuditAPILog
-		var reqH, reqB, respB, meta sql.NullString
+		var reqH, respH, reqB, respB, meta sql.NullString
 		var errMsg, userID, txID sql.NullString
 		var statusCode, duration sql.NullInt64
 		var created time.Time
 		if err := rows.Scan(&l.ID, &l.Service, &l.Endpoint, &l.Method,
-			&statusCode, &reqH, &reqB, &respB,
+			&statusCode, &reqH, &respH, &reqB, &respB,
 			&duration, &errMsg, &userID, &meta, &txID, &created); err != nil {
 			return nil, err
 		}
@@ -218,6 +219,9 @@ func (s *sqlStore) QueryAPILogs(ctx context.Context, table string, f entry.APIFi
 		l.DurationMs = int(duration.Int64)
 		if reqH.Valid {
 			l.RequestHeaders = []byte(reqH.String)
+		}
+		if respH.Valid {
+			l.ResponseHeaders = []byte(respH.String)
 		}
 		if reqB.Valid {
 			l.RequestBody = []byte(reqB.String)
