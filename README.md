@@ -336,6 +336,24 @@ Shipped:
 - CI (GitHub Actions) for core + adapter tests across SQLite / Postgres / MySQL.
 - Benchmarks for core hot paths (diff, record, API audit, transaction ID).
 
+## AI integration
+
+go-audit ships with first-class support for AI coding assistants:
+
+- **Claude Skill** — copy [`skills/go-audit/SKILL.md`](skills/go-audit/SKILL.md)
+  into your project's `.claude/skills/go-audit/` (or
+  `~/.claude/skills/go-audit/`) and Claude Code will know how to
+  integrate go-audit correctly from a cold prompt ("set up an audit
+  trail for this GORM project").
+- **MCP server** — [`mcp/`](mcp/) is a Model Context Protocol server
+  that exposes the query API (`Query`, `QueryByTransaction`,
+  `Snapshot`, …) as tools. Wire it into Claude Code / Claude.ai /
+  Cursor to investigate audit history conversationally:
+  > "Show me every change to order #42 in the last 24 hours."
+  > "What did that user look like at 09:00 yesterday?"
+
+See [`mcp/README.md`](mcp/README.md) for install + configuration.
+
 ## License
 
 MIT
