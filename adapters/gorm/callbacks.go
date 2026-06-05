@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/gopackx/go-audit"
 	"gorm.io/gorm"
@@ -18,17 +19,71 @@ type oldValuesKey struct{}
 
 // seenRowsKey marks (entityType, entityID) pairs that have already been
 // recorded for the current statement so nested association inserts don't get
-// double-audited when GORM walks parent + child slices.
+// double-audited when GORM walks parent + child slices. Used as the
+// per-statement dedup fallback when an operation is not inside a transaction.
 type seenRowsKey struct{}
+
+// dedupState is the set of (entityType, entityID) pairs already audited within
+// a single transaction, plus a depth counter so the set is torn down only once
+// the outermost operation in that transaction completes.
+type dedupState struct {
+	depth int
+	seen  map[string]struct{}
+}
 
 type callbacks struct {
 	auditor audit.Auditor
+
+	// mu guards txDedup. Entries are keyed by the transaction's ConnPool (a
+	// *sql.Tx), so each in-flight transaction gets its own dedup set and the
+	// set survives across the multiple GORM statements (initial INSERT +
+	// FK-backfill upsert, parent + nested associations) that make up one
+	// logical write. A single *sql.Tx is never used concurrently, so the
+	// returned set is safe to read/write without holding mu.
+	mu      sync.Mutex
+	txDedup map[any]*dedupState
 }
 
-func newCallbacks(a audit.Auditor) *callbacks { return &callbacks{auditor: a} }
+func newCallbacks(a audit.Auditor) *callbacks {
+	return &callbacks{auditor: a, txDedup: map[any]*dedupState{}}
+}
 
 func (c *callbacks) afterCreate(db *gorm.DB) {
 	c.recordEach(db, audit.ActionCreate, nil)
+}
+
+// enter/leave bracket every create/update/delete callback chain. They maintain
+// a per-transaction depth counter so the shared dedup set lives for the whole
+// operation tree (outer write + every nested association / backfill statement)
+// and is freed exactly when the outermost operation unwinds — no leak.
+func (c *callbacks) enter(db *gorm.DB) {
+	pool := txKey(db)
+	if pool == nil {
+		return // not in a transaction: per-statement fallback handles dedup
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.txDedup[pool]
+	if st == nil {
+		st = &dedupState{seen: map[string]struct{}{}}
+		c.txDedup[pool] = st
+	}
+	st.depth++
+}
+
+func (c *callbacks) leave(db *gorm.DB) {
+	pool := txKey(db)
+	if pool == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st := c.txDedup[pool]; st != nil {
+		st.depth--
+		if st.depth <= 0 {
+			delete(c.txDedup, pool)
+		}
+	}
 }
 
 func (c *callbacks) beforeUpdate(db *gorm.DB) {
@@ -89,11 +144,13 @@ func (c *callbacks) recordEach(db *gorm.DB, action string, old map[string]map[st
 		txID = audit.NewTransactionID()
 	}
 
-	// Per-statement dedup: GORM's nested-association inserts can iterate the
-	// same child row twice (once via the parent's ReflectValue walk, once via
-	// the dedicated association create callback). Track (entityType,
-	// entityID) pairs already emitted on this statement and skip repeats.
-	seen := loadOrInitSeen(db)
+	// Dedup: GORM can audit the same row more than once per logical write —
+	// nested associations walk parent + child slices, and on Postgres ≥ v1.31
+	// a nested Create runs the create-callback chain twice (initial INSERT then
+	// an FK-backfill upsert) across two separate statements. The seen-set is
+	// scoped to the whole transaction so cross-statement repeats are caught,
+	// falling back to per-statement scope when not in a transaction.
+	seen := c.seenSet(db)
 
 	iterateRows(db, func(rv reflect.Value) {
 		entityID := primaryKeyString(db.Statement.Schema, rv)
@@ -173,8 +230,29 @@ func snapshotRows(db *gorm.DB) (map[string]map[string]any, error) {
 	return out, nil
 }
 
+// seenSet returns the dedup set in scope for the current operation. Inside a
+// transaction it returns the transaction-shared set (populated by enter), so
+// repeats across separate statements of one logical write are caught. Outside
+// a transaction it falls back to a per-statement set stashed on Settings,
+// which is sufficient because a single statement can't span associations.
+func (c *callbacks) seenSet(db *gorm.DB) map[string]struct{} {
+	if pool := txKey(db); pool != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if st := c.txDedup[pool]; st != nil {
+			return st.seen
+		}
+		// enter should have created it; be defensive if callback order ever
+		// changes so we never nil-panic.
+		st := &dedupState{depth: 1, seen: map[string]struct{}{}}
+		c.txDedup[pool] = st
+		return st.seen
+	}
+	return loadOrInitSeen(db)
+}
+
 // loadOrInitSeen returns the per-statement dedup set, creating and stashing
-// it on the statement's Settings on first call.
+// it on the statement's Settings on first call. Used when not in a transaction.
 func loadOrInitSeen(db *gorm.DB) map[string]struct{} {
 	if v, ok := db.Statement.Settings.Load(seenRowsKey{}); ok {
 		if m, ok := v.(map[string]struct{}); ok {
@@ -184,6 +262,21 @@ func loadOrInitSeen(db *gorm.DB) map[string]struct{} {
 	m := map[string]struct{}{}
 	db.Statement.Settings.Store(seenRowsKey{}, m)
 	return m
+}
+
+// txKey returns a comparable key identifying the current transaction, or nil
+// when the operation is not running inside one. GORM sets Statement.ConnPool to
+// the *sql.Tx (which implements gorm.TxCommitter) while in a transaction and to
+// the *sql.DB (which does not) otherwise; all nested association statements of
+// one write inherit the same ConnPool, making it a stable per-transaction key.
+func txKey(db *gorm.DB) any {
+	if db.Statement == nil || db.Statement.ConnPool == nil {
+		return nil
+	}
+	if _, ok := db.Statement.ConnPool.(gorm.TxCommitter); ok {
+		return db.Statement.ConnPool
+	}
+	return nil
 }
 
 // iterateRows invokes fn for each struct in the statement's ReflectValue
