@@ -24,12 +24,18 @@ func (p *plugin) Initialize(db *gorm.DB) error {
 	// enter/leave bracket each callback chain so the transaction-scoped dedup
 	// set spans every statement of one logical write (parent + nested
 	// associations + FK-backfill) and is torn down when the outermost
-	// operation unwinds. enter runs first; leave runs last.
-	enter := func(db *gorm.DB) { cbs.enter(db) }
+	// operation unwinds. enter runs first (recording the root operation kind);
+	// leave runs last.
+	enterCreate := func(db *gorm.DB) { cbs.enter(db, audit.ActionCreate) }
+	enterUpdate := func(db *gorm.DB) { cbs.enter(db, audit.ActionUpdate) }
+	enterDelete := func(db *gorm.DB) { cbs.enter(db, audit.ActionDelete) }
 	leave := func(db *gorm.DB) { cbs.leave(db) }
 
 	c := db.Callback()
-	if err := c.Create().Before("gorm:create").Register("go_audit:enter_create", enter); err != nil {
+	if err := c.Create().Before("gorm:create").Register("go_audit:enter_create", enterCreate); err != nil {
+		return err
+	}
+	if err := c.Create().Before("gorm:create").Register("go_audit:capture_pks", cbs.captureExistingPKs); err != nil {
 		return err
 	}
 	if err := c.Create().After("gorm:create").Register("go_audit:after_create", cbs.afterCreate); err != nil {
@@ -38,7 +44,7 @@ func (p *plugin) Initialize(db *gorm.DB) error {
 	if err := c.Create().After("gorm:after_create").Register("go_audit:leave_create", leave); err != nil {
 		return err
 	}
-	if err := c.Update().Before("gorm:update").Register("go_audit:enter_update", enter); err != nil {
+	if err := c.Update().Before("gorm:update").Register("go_audit:enter_update", enterUpdate); err != nil {
 		return err
 	}
 	if err := c.Update().Before("gorm:update").Register("go_audit:before_update", cbs.beforeUpdate); err != nil {
@@ -50,7 +56,7 @@ func (p *plugin) Initialize(db *gorm.DB) error {
 	if err := c.Update().After("gorm:after_update").Register("go_audit:leave_update", leave); err != nil {
 		return err
 	}
-	if err := c.Delete().Before("gorm:delete").Register("go_audit:enter_delete", enter); err != nil {
+	if err := c.Delete().Before("gorm:delete").Register("go_audit:enter_delete", enterDelete); err != nil {
 		return err
 	}
 	if err := c.Delete().Before("gorm:delete").Register("go_audit:before_delete", cbs.beforeDelete); err != nil {

@@ -23,12 +23,25 @@ type oldValuesKey struct{}
 // per-statement dedup fallback when an operation is not inside a transaction.
 type seenRowsKey struct{}
 
+// existingPKKey holds, per CREATE statement, the set of primary-key strings
+// whose rows already had a non-zero PK *before* the INSERT ran. Such rows are
+// pre-existing records being re-upserted (e.g. GORM re-saving loaded HasMany
+// associations during a parent Update), not genuine inserts — so they must not
+// be audited a second time as `create`. Captured in beforeCreate, read in
+// recordEach. Stored on the statement's Settings because before/after of one
+// statement share it.
+type existingPKKey struct{}
+
 // dedupState is the set of (entityType, entityID) pairs already audited within
 // a single transaction, plus a depth counter so the set is torn down only once
-// the outermost operation in that transaction completes.
+// the outermost operation in that transaction completes. rootAction records the
+// kind of the outermost operation (create/update/delete) that opened the scope,
+// used to tell a genuine nested create (root = create) from an association
+// re-save triggered by a parent update/delete (root != create).
 type dedupState struct {
-	depth int
-	seen  map[string]struct{}
+	depth      int
+	rootAction string
+	seen       map[string]struct{}
 }
 
 type callbacks struct {
@@ -55,8 +68,9 @@ func (c *callbacks) afterCreate(db *gorm.DB) {
 // enter/leave bracket every create/update/delete callback chain. They maintain
 // a per-transaction depth counter so the shared dedup set lives for the whole
 // operation tree (outer write + every nested association / backfill statement)
-// and is freed exactly when the outermost operation unwinds — no leak.
-func (c *callbacks) enter(db *gorm.DB) {
+// and is freed exactly when the outermost operation unwinds — no leak. The
+// first enter in a transaction records the root operation kind.
+func (c *callbacks) enter(db *gorm.DB, action string) {
 	pool := txKey(db)
 	if pool == nil {
 		return // not in a transaction: per-statement fallback handles dedup
@@ -65,10 +79,45 @@ func (c *callbacks) enter(db *gorm.DB) {
 	defer c.mu.Unlock()
 	st := c.txDedup[pool]
 	if st == nil {
-		st = &dedupState{seen: map[string]struct{}{}}
+		st = &dedupState{seen: map[string]struct{}{}, rootAction: action}
 		c.txDedup[pool] = st
 	}
 	st.depth++
+}
+
+// captureExistingPKs runs before a CREATE statement and records, on the
+// statement's Settings, the primary keys of rows that already have a non-zero
+// PK. Those rows are not first-time inserts (GORM is re-upserting pre-existing
+// associations), so recordEach can skip auditing them as `create`.
+func (c *callbacks) captureExistingPKs(db *gorm.DB) {
+	if db.Statement == nil || db.Statement.Schema == nil {
+		return
+	}
+	existing := map[string]struct{}{}
+	iterateRows(db, func(rv reflect.Value) {
+		if pkIsZero(db.Statement.Schema, rv) {
+			return
+		}
+		existing[primaryKeyString(db.Statement.Schema, rv)] = struct{}{}
+	})
+	if len(existing) > 0 {
+		db.Statement.Settings.Store(existingPKKey{}, existing)
+	}
+}
+
+// rootAction returns the kind of the outermost operation for the current
+// transaction, or "" when not in a transaction (or none recorded yet).
+func (c *callbacks) rootAction(db *gorm.DB) string {
+	pool := txKey(db)
+	if pool == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st := c.txDedup[pool]; st != nil {
+		return st.rootAction
+	}
+	return ""
 }
 
 func (c *callbacks) leave(db *gorm.DB) {
@@ -152,8 +201,27 @@ func (c *callbacks) recordEach(db *gorm.DB, action string, old map[string]map[st
 	// falling back to per-statement scope when not in a transaction.
 	seen := c.seenSet(db)
 
+	// A row whose PK already existed before a CREATE statement, fired while the
+	// transaction's root operation is an update/delete, is GORM re-saving a
+	// loaded association (e.g. Model(&parent).Update(...) with parent.Items
+	// still attached re-upserts the children). That's a re-link, not a genuine
+	// insert, so it must not be re-audited as `create`. A genuine nested create
+	// (root = create) and new children added during an update (PK still zero)
+	// are unaffected.
+	var existingPK map[string]struct{}
+	if action == audit.ActionCreate && c.rootAction(db) != "" && c.rootAction(db) != audit.ActionCreate {
+		if v, ok := db.Statement.Settings.Load(existingPKKey{}); ok {
+			existingPK, _ = v.(map[string]struct{})
+		}
+	}
+
 	iterateRows(db, func(rv reflect.Value) {
 		entityID := primaryKeyString(db.Statement.Schema, rv)
+		if existingPK != nil {
+			if _, reSaved := existingPK[entityID]; reSaved {
+				return
+			}
+		}
 		seenKey := entityType + "\x00" + entityID
 		if _, dup := seen[seenKey]; dup {
 			return
@@ -322,6 +390,22 @@ func primaryKeyString(s *schema.Schema, rv reflect.Value) string {
 		return fmt.Sprintf("%v", values)
 	}
 	return string(b)
+}
+
+// pkIsZero reports whether every primary-key field of the row is the zero value
+// (i.e. an auto-increment PK not yet assigned). A row with any non-zero PK is
+// treated as already-persisted.
+func pkIsZero(s *schema.Schema, rv reflect.Value) bool {
+	if len(s.PrimaryFields) == 0 {
+		return true
+	}
+	rv = reflect.Indirect(rv)
+	for _, f := range s.PrimaryFields {
+		if _, zero := f.ValueOf(nil, rv); !zero {
+			return false
+		}
+	}
+	return true
 }
 
 func fieldValues(s *schema.Schema, rv reflect.Value) map[string]any {
