@@ -62,7 +62,7 @@ func run() error {
 		"go-audit",
 		// Server version reported in the MCP initialize handshake. Must be
 		// bumped together with the mcp/vX.Y.Z git tag on every release.
-		"1.1.1",
+		"1.1.2",
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
 	)

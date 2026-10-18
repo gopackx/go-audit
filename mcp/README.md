@@ -141,8 +141,13 @@ Tagged independently from the core as `mcp/vX.Y.Z`. Install a specific
 version with:
 
 ```bash
-go install github.com/gopackx/go-audit/mcp@v1.1.1
+go install github.com/gopackx/go-audit/mcp@v1.1.2
 ```
+
+`mcp/v1.1.2` depends on core `v1.1.1`, which fixes the SQLite date-filter
+bug: `date_from`, `date_to` and `at` were compared as zone-tagged strings,
+so a non-UTC value could match the wrong rows. On SQLite use `mcp/v1.1.2`
+or later. Tool names and parameters are unchanged.
 
 > **Note:** `mcp/v1.1.0` (and earlier) cannot be installed with
 > `go install`: its `go.mod` carries a `replace` directive pointing at the

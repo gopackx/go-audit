@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/go-sql-driver/mysql v1.8.1
-	github.com/gopackx/go-audit v1.1.0
+	github.com/gopackx/go-audit v1.1.1
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/mark3labs/mcp-go v0.20.1
 	modernc.org/sqlite v1.34.2
