@@ -122,6 +122,18 @@ The snapshot SELECT runs against the base `*bun.DB`, so uncommitted writes insid
 
 Derived from the Bun table name (e.g., `"products"`).
 
+### Error Handling
+
+`bun.QueryHook.AfterQuery` runs after the statement has executed and cannot change the error Bun returns, so `ErrorFailLoud` cannot abort a Bun query. When the auditor returns a store error the hook passes it to the handler configured with `WithErrorHandler`; the default logs through `Config.Logger`.
+
+```go
+auditbun.Register(db, auditor, auditbun.WithErrorHandler(func(ctx context.Context, err error) {
+    // raise a metric, trip a health check, mark the tx for rollback…
+}))
+```
+
+Under `ErrorFailSilent` the auditor logs and swallows the error itself and the handler is never called.
+
 ---
 
 ## Ent Adapter
@@ -160,6 +172,10 @@ Derived from `m.Type()` on the mutation (e.g., `"Product"` -> lowercased to matc
 ### Old Values
 
 The adapter uses reflection to call `m.OldField(ctx)` for each changed field, capturing the pre-mutation value. This works through Ent's built-in mutation tracking.
+
+### Error Handling
+
+The hook wraps the mutation, so under `ErrorFailLoud` a failed audit write is returned from `Mutate` as `go-audit: record <action>: <store error>` (unwrap with `errors.Is` / `errors.As`) together with the mutation result — the mutation has already been applied, like GORM's `AddError`. Bulk mutations still offer every row to the store and join the failures into one error. Under `ErrorFailSilent` the auditor logs and returns `nil`, so the mutation completes normally.
 
 ---
 

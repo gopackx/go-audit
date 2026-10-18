@@ -18,11 +18,22 @@
 // the current *bun.Tx, so uncommitted rows written earlier in the same
 // transaction are not visible. For strict tx-local snapshots, load rows
 // explicitly before the write, or use the GORM adapter.
+//
+// Error handling: bun.QueryHook.AfterQuery runs after the statement has
+// already executed and cannot change the error Bun returns to the caller (Bun
+// copies its local err into the event and then returns that same local
+// value), so ErrorFailLoud cannot abort an already-executed Bun query.
+// Instead, when the Auditor returns an error from RecordDataChange — which it
+// does under ErrorFailLoud — the hook passes it to the handler configured via
+// WithErrorHandler. The default handler logs through the Auditor's
+// Config.Logger (log.Printf when nil). Under ErrorFailSilent the Auditor logs
+// and swallows the error itself, so the handler is never invoked.
 package bun
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"reflect"
 	"strings"
 
@@ -31,15 +42,58 @@ import (
 	"github.com/uptrace/bun/schema"
 )
 
+// Option configures the hook installed by Register.
+type Option func(*hook)
+
+// WithErrorHandler sets the function invoked when the Auditor returns an
+// error from RecordDataChange, i.e. an audit-store failure under
+// ErrorFailLoud. Bun's AfterQuery cannot alter the result of the statement
+// that already executed, so this handler is the only place a Bun write's
+// audit failure can be observed: use it to raise a metric, trip a health
+// check, or mark the surrounding transaction for rollback. The default
+// handler logs via the Auditor's Config.Logger (log.Printf when nil). Under
+// ErrorFailSilent the Auditor already logs and returns nil, so fn is never
+// called. A nil fn keeps the default.
+func WithErrorHandler(fn func(ctx context.Context, err error)) Option {
+	return func(h *hook) {
+		if fn != nil {
+			h.onError = fn
+		}
+	}
+}
+
 // Register installs the audit QueryHook on db. All subsequent writes through
-// db are audited automatically.
-func Register(db *bun.DB, auditor audit.Auditor) {
-	db.AddQueryHook(&hook{auditor: auditor, db: db})
+// db are audited automatically. See WithErrorHandler for how audit-store
+// failures are reported.
+func Register(db *bun.DB, auditor audit.Auditor, opts ...Option) {
+	h := &hook{auditor: auditor, db: db}
+	for _, opt := range opts {
+		opt(h)
+	}
+	if h.onError == nil {
+		logf := auditor.Config().Logger
+		if logf == nil {
+			logf = log.Printf
+		}
+		h.onError = func(_ context.Context, err error) { logf("%v", err) }
+	}
+	db.AddQueryHook(h)
 }
 
 type hook struct {
 	auditor audit.Auditor
 	db      *bun.DB
+	onError func(ctx context.Context, err error)
+}
+
+// record forwards entry to the Auditor and routes any returned error (a store
+// failure under ErrorFailLoud) to the configured error handler, since the
+// query that triggered it has already completed.
+func (h *hook) record(ctx context.Context, entry audit.DataEntry) {
+	if err := h.auditor.RecordDataChange(ctx, entry); err != nil {
+		h.onError(ctx, fmt.Errorf("go-audit: bun: record %s %s/%s: %w",
+			entry.Action, entry.EntityType, entry.EntityID, err))
+	}
 }
 
 // snapshotKey stashes pre-change row values keyed by primary-key string.
@@ -132,7 +186,7 @@ func (h *hook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
 		iterateRows(rv, func(row reflect.Value) {
 			entityID := primaryKeyString(table, row)
 			values := fieldValues(table, row)
-			emitEntry(ctx, h.auditor, table, action, entityID, values, snap, txID)
+			h.emitEntry(ctx, table, action, entityID, values, snap, txID)
 			rowsEmitted++
 		})
 	}
@@ -154,14 +208,13 @@ func (h *hook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
 			case audit.ActionDelete:
 				entry.OldValues = old
 			}
-			_ = h.auditor.RecordDataChange(ctx, entry)
+			h.record(ctx, entry)
 		}
 	}
 }
 
-func emitEntry(
+func (h *hook) emitEntry(
 	ctx context.Context,
-	auditor audit.Auditor,
 	table *schema.Table,
 	action, entityID string,
 	values map[string]any,
@@ -191,7 +244,7 @@ func emitEntry(
 			entry.OldValues = values
 		}
 	}
-	_ = auditor.RecordDataChange(ctx, entry)
+	h.record(ctx, entry)
 }
 
 // snapshotByPKs runs SELECT * WHERE (pk1=? AND pk2=?) OR (...) using the PK

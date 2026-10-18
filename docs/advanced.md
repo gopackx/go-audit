@@ -212,7 +212,11 @@ go-audit supports two error modes, configurable independently for data and API a
 
 ### ErrorFailLoud (Default)
 
-Storage errors are returned to the caller. In GORM, this means the error is attached via `db.AddError()` and surfaces through `db.Error`.
+Storage errors are returned by the auditor and surfaced as far as each ORM allows:
+
+- **GORM** — attached via `db.AddError()`, visible through `db.Error`.
+- **Ent** — returned from the mutation as `go-audit: record <action>: <store error>` (unwrap with `errors.Is`), alongside the mutation result.
+- **Bun** — `AfterQuery` cannot alter an already-returned error, so the error is passed to the `auditbun.WithErrorHandler` callback (default: logged via `Config.Logger`).
 
 ```go
 DataAudit: audit.DataAuditConfig{
@@ -220,7 +224,7 @@ DataAudit: audit.DataAuditConfig{
 },
 ```
 
-Use this for **compliance-strict deployments** where a failed audit log should block the operation.
+Use this for **compliance-strict deployments** where a failed audit log must not go unnoticed. Note that the ORM write has already been applied when the audit store fails; to make the failure block the operation, run the write in a transaction and return the error from the closure. See [configuration.md](configuration.md#onerror-errormode) for the per-adapter table.
 
 ### ErrorFailSilent
 

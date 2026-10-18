@@ -13,10 +13,21 @@
 //   - Update / Delete (bulk) → one entry per affected row; IDs are fetched
 //     from the mutation (reflection on m.IDs) and old values are fetched per
 //     row before the mutation executes.
+//
+// Error handling: the hook wraps the mutation, so it can surface audit-store
+// failures to the caller. Under ErrorFailLoud (the default) a failed
+// RecordDataChange is returned from Mutate as
+// "go-audit: record <action>: <store error>" (unwrappable with errors.Is /
+// errors.As) together with the mutation result, because the mutation itself
+// has already been applied — mirroring the GORM adapter's db.AddError. A
+// surrounding transaction whose closure returns that error will roll the
+// write back. Under ErrorFailSilent the Auditor logs the failure via
+// Config.Logger and Mutate returns nil as usual.
 package ent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -71,6 +82,7 @@ func Hook(auditor audit.Auditor) ent.Hook {
 				txID = audit.NewTransactionID()
 			}
 
+			var recordErrs []error
 			for _, id := range ids {
 				entry := audit.DataEntry{
 					EntityType:    m.Type(),
@@ -89,7 +101,18 @@ func Hook(auditor audit.Auditor) ent.Hook {
 						entry.OldValues = v
 					}
 				}
-				_ = auditor.RecordDataChange(ctx, entry)
+				if err := auditor.RecordDataChange(ctx, entry); err != nil {
+					// Under ErrorFailLoud the Auditor returns store failures.
+					// Keep recording the remaining rows so the trail is as
+					// complete as possible, then surface the failure(s) to
+					// the caller alongside the already-applied mutation.
+					// Under ErrorFailSilent the Auditor has already logged
+					// and returned nil.
+					recordErrs = append(recordErrs, err)
+				}
+			}
+			if len(recordErrs) > 0 {
+				return result, fmt.Errorf("go-audit: record %s: %w", action, errors.Join(recordErrs...))
 			}
 			return result, nil
 		})

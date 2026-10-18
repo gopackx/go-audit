@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gopackx/go-audit"
@@ -245,9 +248,108 @@ func TestExtractWhere(t *testing.T) {
 // dialect types. Only the behavior exercised by these tests is needed.
 type noopDialect struct{}
 
-func (noopDialect) Name() audit.DialectType                 { return audit.SQLite }
-func (noopDialect) CreateDataTableSQL(string) string        { return "" }
-func (noopDialect) CreateAPITableSQL(string) string         { return "" }
-func (noopDialect) CreateIndexesSQL(string) []string        { return nil }
-func (noopDialect) CreateAPIIndexesSQL(string) []string     { return nil }
-func (noopDialect) Placeholder(int) string                  { return "?" }
+func (noopDialect) Name() audit.DialectType             { return audit.SQLite }
+func (noopDialect) CreateDataTableSQL(string) string    { return "" }
+func (noopDialect) CreateAPITableSQL(string) string     { return "" }
+func (noopDialect) CreateIndexesSQL(string) []string    { return nil }
+func (noopDialect) CreateAPIIndexesSQL(string) []string { return nil }
+func (noopDialect) Placeholder(int) string              { return "?" }
+
+// errStore wraps a real Store but always fails on SaveDataLog, simulating an
+// audit-store outage.
+type errStore struct{ audit.Store }
+
+var errStoreDown = errors.New("audit store down")
+
+func (*errStore) SaveDataLog(context.Context, string, audit.AuditLog) error { return errStoreDown }
+
+func newFailingAuditor(t *testing.T, mode audit.ErrorMode, logf func(string, ...any)) audit.Auditor {
+	t.Helper()
+	a, err := audit.NewWithStore(&errStore{Store: audit.NewMemoryStore()}, noopDialect{}, audit.Config{
+		Dialect:   audit.SQLite,
+		UserFunc:  func(context.Context) (string, string) { return "tester", "user" },
+		Logger:    logf,
+		DataAudit: audit.DataAuditConfig{Enabled: true, OnError: mode},
+	})
+	if err != nil {
+		t.Fatalf("NewWithStore: %v", err)
+	}
+	return a
+}
+
+// Under ErrorFailLoud the auditor returns the store error. Bun's AfterQuery
+// cannot alter the result of the already-executed statement, so the hook must
+// route it to the WithErrorHandler callback — and the business write succeeds.
+func TestBunHook_ErrorFailLoud_RoutesToErrorHandler(t *testing.T) {
+	ctx := context.Background()
+	db := newBunDB(t)
+	var logged []string
+	a := newFailingAuditor(t, audit.ErrorFailLoud, func(f string, args ...any) {
+		logged = append(logged, fmt.Sprintf(f, args...))
+	})
+	var handled []error
+	Register(db, a, WithErrorHandler(func(_ context.Context, err error) { handled = append(handled, err) }))
+
+	p := &Product{Name: "widget", Price: 100}
+	if _, err := db.NewInsert().Model(p).Exec(ctx); err != nil {
+		t.Fatalf("insert must still succeed, got: %v", err)
+	}
+	var n int
+	if err := db.NewSelect().Model((*Product)(nil)).ColumnExpr("count(*)").Scan(ctx, &n); err != nil || n != 1 {
+		t.Fatalf("row must be persisted: n=%d err=%v", n, err)
+	}
+
+	if len(handled) != 1 {
+		t.Fatalf("want 1 handled error, got %d: %v", len(handled), handled)
+	}
+	if !errors.Is(handled[0], errStoreDown) {
+		t.Fatalf("handler error should wrap the store error, got %v", handled[0])
+	}
+	if !strings.Contains(handled[0].Error(), "record create products/1") {
+		t.Fatalf("handler error should name action and entity, got %q", handled[0])
+	}
+	if len(logged) != 0 {
+		t.Fatalf("custom handler replaces default logging, but Logger got %v", logged)
+	}
+}
+
+// Without WithErrorHandler the default handler logs via Config.Logger.
+func TestBunHook_ErrorFailLoud_DefaultHandlerLogs(t *testing.T) {
+	ctx := context.Background()
+	db := newBunDB(t)
+	var logged []string
+	a := newFailingAuditor(t, audit.ErrorFailLoud, func(f string, args ...any) {
+		logged = append(logged, fmt.Sprintf(f, args...))
+	})
+	Register(db, a)
+
+	if _, err := db.NewInsert().Model(&Product{Name: "widget"}).Exec(ctx); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], errStoreDown.Error()) {
+		t.Fatalf("want one log line mentioning the store error, got %v", logged)
+	}
+}
+
+// Under ErrorFailSilent the auditor itself logs and returns nil, so the
+// error handler is never invoked and nothing bubbles up.
+func TestBunHook_ErrorFailSilent_SwallowsAndLogs(t *testing.T) {
+	ctx := context.Background()
+	db := newBunDB(t)
+	var logged []string
+	a := newFailingAuditor(t, audit.ErrorFailSilent, func(f string, args ...any) {
+		logged = append(logged, fmt.Sprintf(f, args...))
+	})
+	handlerCalls := 0
+	Register(db, a, WithErrorHandler(func(context.Context, error) { handlerCalls++ }))
+
+	if _, err := db.NewInsert().Model(&Product{Name: "widget"}).Exec(ctx); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if handlerCalls != 0 {
+		t.Fatalf("handler must not run under ErrorFailSilent, ran %d times", handlerCalls)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "save data log") {
+		t.Fatalf("auditor should have logged the swallowed error once, got %v", logged)
+	}
+}

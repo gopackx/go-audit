@@ -153,6 +153,19 @@ The snapshot SELECT runs against the base `*bun.DB`, so uncommitted writes
 inside an active `*bun.Tx` are not visible. For strict tx-local snapshots,
 load rows explicitly before the write.
 
+Bun's `AfterQuery` hook runs after the statement has executed and cannot
+change the error the caller receives, so under `ErrorFailLoud` a failed audit
+write cannot abort the Bun query. The hook hands the error to an error
+handler instead; the default logs it through `Config.Logger`, and you can
+replace it to raise a metric or mark the surrounding transaction for
+rollback:
+
+```go
+auditbun.Register(bunDB, auditor, auditbun.WithErrorHandler(func(ctx context.Context, err error) {
+    metrics.Inc("audit_failures")
+}))
+```
+
 ## Ent adapter
 
 ```go
@@ -169,6 +182,12 @@ automatically. Single-row updates / deletes capture `old_values` via
 `ent.Mutation.OldField`; bulk updates / deletes log affected IDs (fetched
 from the mutation) with new_values. As with the other adapters,
 `DataAuditConfig.SkipOldValues = true` skips the pre-mutation fetch.
+
+Because the hook wraps the mutation, `ErrorFailLoud` works like GORM's
+`AddError`: a failed audit write is returned from the mutation as
+`go-audit: record <action>: <store error>` (use `errors.Is` to unwrap it)
+together with the mutation result, since the mutation itself has already
+been applied. Returning that error from a `tx` closure rolls the write back.
 
 ## Soft deletes (GORM)
 
@@ -240,7 +259,7 @@ type Config struct {
 | `ExcludeFields` | Column names dropped from both `old_values` and `new_values` (e.g. `password`, `remember_token`). |
 | `ExcludeEntities` | Entire tables to skip — useful for high-volume housekeeping tables (`sessions`, `jobs`) or to avoid recursively auditing the audit table itself. |
 | `SkipOldValues` | When `true` the adapter skips the pre-write `SELECT` snapshot used to populate `old_values` on UPDATE/DELETE. Trades audit completeness for one fewer round-trip per write. Same flag works for GORM, Bun and Ent. |
-| `OnError` | Per-table error policy — `ErrorFailLoud` (default) surfaces store failures back to the caller; `ErrorFailSilent` logs and swallows them. The `APIAudit` block has its own independent `OnError`, so you can fail-loud on data changes but fail-silent on API logging (or vice versa). |
+| `OnError` | Per-table error policy. `ErrorFailLoud` (default) makes the auditor return store failures, and each adapter surfaces them as far as its ORM allows: **GORM** attaches the error to the `*gorm.DB` via `AddError` (visible in `db.Error`); **Ent** returns it from the mutation as `go-audit: record <action>: …` after the mutation has been applied; **Bun** cannot abort an already-executed query, so the error goes to the `auditbun.WithErrorHandler` callback (default: logged via `Config.Logger`). In every adapter the ORM write has already happened — fail-loud reports, it does not roll back on its own. `ErrorFailSilent` logs via `Config.Logger` and swallows the error everywhere. The `APIAudit` block has its own independent `OnError`, so you can fail-loud on data changes but fail-silent on API logging (or vice versa). |
 
 ### API audit knobs
 

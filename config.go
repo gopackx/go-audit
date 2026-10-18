@@ -15,7 +15,8 @@ type Config struct {
 	APIAudit  APIAuditConfig
 
 	// Logger is invoked when a storage error is swallowed under
-	// ErrorFailSilent. nil falls back to log.Printf.
+	// ErrorFailSilent, and by the Bun adapter's default error handler under
+	// ErrorFailLoud. nil falls back to log.Printf.
 	Logger func(format string, args ...any)
 }
 
@@ -23,10 +24,13 @@ type Config struct {
 type ErrorMode int
 
 const (
-	// ErrorFailLoud surfaces store errors back to the caller. Default —
-	// in the GORM adapter the error is attached to the *gorm.DB via
-	// AddError so callers see it via db.Error. This is also the mode to
-	// use for compliance-strict deployments.
+	// ErrorFailLoud surfaces store errors back to the caller. Default, and
+	// the mode to use for compliance-strict deployments. Each adapter
+	// propagates the error as far as its ORM allows: GORM attaches it to
+	// the *gorm.DB via AddError (visible in db.Error); Ent returns it from
+	// the mutation alongside the result; Bun cannot alter an
+	// already-executed query's error, so the error is handed to the
+	// adapter's WithErrorHandler callback (default: logged via Logger).
 	ErrorFailLoud ErrorMode = iota
 
 	// ErrorFailSilent logs store errors via Config.Logger and returns nil.

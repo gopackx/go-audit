@@ -125,7 +125,7 @@ Controls behavior when a storage operation fails.
 
 | Value | Constant | Behavior |
 |-------|----------|----------|
-| `0` | `audit.ErrorFailLoud` | Returns the error to the caller. In GORM, attaches via `AddError`. **Default.** |
+| `0` | `audit.ErrorFailLoud` | The auditor returns the store error to its caller. How far it travels depends on the adapter — see the table below. **Default.** |
 | `1` | `audit.ErrorFailSilent` | Logs the error via `Config.Logger` and returns `nil`. Use when audit failures shouldn't block writes. |
 
 ```go
@@ -133,6 +133,20 @@ DataAudit: audit.DataAuditConfig{
     OnError: audit.ErrorFailSilent, // Don't block writes if audit DB is down
 },
 ```
+
+#### What `ErrorFailLoud` means per adapter
+
+In every adapter the ORM write has already been executed by the time the
+audit store fails, so fail-loud *reports* the failure; it does not roll the
+write back by itself. Run the write inside a transaction and return the error
+from the closure if you need rollback.
+
+| Adapter | What the caller sees |
+|---------|----------------------|
+| GORM | The error is attached to the `*gorm.DB` via `db.AddError`, so it appears in `db.Error` / the returned `*gorm.DB`. A `db.Transaction` closure that returns it rolls back. |
+| Ent | `Mutate` returns `go-audit: record <action>: <store error>` (unwrap with `errors.Is` / `errors.As`) together with the mutation result. For bulk mutations every row is still offered to the store and the failures are joined into one error. |
+| Bun | `bun.QueryHook.AfterQuery` runs after the statement and cannot change the error Bun returns, so the query succeeds and the error is passed to the handler set with `auditbun.WithErrorHandler(func(ctx, err))`. The default handler logs via `Config.Logger` (`log.Printf` when nil). |
+| Direct `RecordDataChange` / `RecordAPICall` | Returned as-is. |
 
 ## APIAuditConfig
 
@@ -187,7 +201,7 @@ MaxBodySize: 8192, // 8 KiB
 
 ## Logger
 
-Custom logger for errors swallowed under `ErrorFailSilent`. Falls back to `log.Printf` if nil.
+Custom logger for errors swallowed under `ErrorFailSilent`, and for the Bun adapter's default error handler under `ErrorFailLoud` (see [OnError](#onerror-errormode)). Falls back to `log.Printf` if nil.
 
 ```go
 Logger: func(format string, args ...any) {
