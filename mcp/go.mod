@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/go-sql-driver/mysql v1.8.1
-	github.com/gopackx/go-audit v0.0.0
+	github.com/gopackx/go-audit v1.1.0
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/mark3labs/mcp-go v0.20.1
 	modernc.org/sqlite v1.34.2
@@ -33,5 +33,3 @@ require (
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
-
-replace github.com/gopackx/go-audit => ../

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 permissions:
@@ -12,6 +12,46 @@ jobs:
   core:
     name: core + adapter unit tests
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: go vet (core)
+        run: go vet ./...
+      - name: go test (core)
+        run: go test -race ./...
+      - name: go vet (gorm adapter)
+        working-directory: adapters/gorm
+        run: go vet ./...
+      - name: go test (gorm adapter)
+        working-directory: adapters/gorm
+        run: go test -race ./...
+      - name: go vet (bun adapter)
+        working-directory: adapters/bun
+        run: go vet ./...
+      - name: go test (bun adapter)
+        working-directory: adapters/bun
+        run: go test -race ./...
+      - name: go vet (ent adapter)
+        working-directory: adapters/ent
+        run: go vet ./...
+      - name: go test (ent adapter)
+        working-directory: adapters/ent
+        run: go test -race ./...
+      - name: go vet (mcp server)
+        working-directory: mcp
+        run: go vet ./...
+      - name: go build (mcp server)
+        working-directory: mcp
+        run: go build ./...
+
+  core-min:
+    name: core + gorm adapter on Go 1.22 (declared minimum)
+    runs-on: ubuntu-latest
+    env:
+      # Fail loudly instead of silently downloading a newer toolchain.
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -35,7 +75,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25.x"
       - name: go test (integration / sqlite)
         working-directory: integration
         run: go test -race -run TestSQLite ./...
@@ -61,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25.x"
       - name: go test (integration / postgres)
         working-directory: integration
         env:
@@ -90,7 +130,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25.x"
       - name: go test (integration / mysql)
         working-directory: integration
         env:

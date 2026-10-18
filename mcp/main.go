@@ -60,7 +60,9 @@ func run() error {
 
 	srv := server.NewMCPServer(
 		"go-audit",
-		"1.0.0",
+		// Server version reported in the MCP initialize handshake. Must be
+		// bumped together with the mcp/vX.Y.Z git tag on every release.
+		"1.1.1",
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
 	)

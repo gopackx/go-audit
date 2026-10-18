@@ -28,13 +28,17 @@ to keep results in the AI's context window.
 ## Install
 
 ```bash
-# Installs the binary as `mcp` (Go uses the module directory name).
+# Installs the binary as `mcp` (Go names it after the last element of the
+# import path). Requires mcp/v1.1.1 or later -- see Versioning below.
 go install github.com/gopackx/go-audit/mcp@latest
 
-# Rename for clarity (optional):
-mv "$(go env GOBIN)/mcp" "$(go env GOBIN)/audit-mcp"
+# Rename for clarity (optional). `go install` writes to $GOBIN, or to
+# $GOPATH/bin when GOBIN is unset:
+BIN="$(go env GOBIN)"; BIN="${BIN:-$(go env GOPATH)/bin}"
+mv "$BIN/mcp" "$BIN/audit-mcp"   # on Windows the file is mcp.exe
 
-# Or build locally with the name you want:
+# Or build from a clone with the name you want:
+git clone https://github.com/gopackx/go-audit && cd go-audit/mcp
 go build -o audit-mcp .
 ```
 
@@ -133,9 +137,34 @@ app's own admin tooling, not in an AI tool surface.
 
 ## Versioning
 
-Tagged independently from the core: `mcp/v1.0.0`, `mcp/v1.1.0`, ….
-Install a specific version with:
+Tagged independently from the core as `mcp/vX.Y.Z`. Install a specific
+version with:
 
 ```bash
-go install github.com/gopackx/go-audit/mcp@v1.1.0
+go install github.com/gopackx/go-audit/mcp@v1.1.1
 ```
+
+> **Note:** `mcp/v1.1.0` (and earlier) cannot be installed with
+> `go install`: its `go.mod` carries a `replace` directive pointing at the
+> local checkout, which `go install pkg@version` rejects. Use `mcp/v1.1.1`
+> or later.
+
+### Local development
+
+`mcp/go.mod` requires a **published** go-audit release (no `replace`
+directive), so a plain `go build` inside `mcp/` compiles against that
+release from the module proxy, not against the core in your checkout.
+To try the server against unreleased core changes, add a temporary
+replace and drop it again before committing:
+
+```bash
+cd mcp
+go mod edit -replace github.com/gopackx/go-audit=../
+go build -o audit-mcp .
+go mod edit -dropreplace github.com/gopackx/go-audit && go mod tidy
+```
+
+The repo deliberately has no committed `go.work`: a workspace would merge
+the dependency graphs of every module (and force the newest module's Go
+version on all of them), so per-module tests would no longer reflect each
+module's own `go.mod`.

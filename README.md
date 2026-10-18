@@ -17,18 +17,21 @@ Automated audit trail and API call logging for Go applications.
 
 ```bash
 go get github.com/gopackx/go-audit
-go get github.com/gopackx/go-audit/adapters/gorm  # optional, for GORM users
-go get github.com/gopackx/go-audit/adapters/bun   # optional, for Bun users
-go get github.com/gopackx/go-audit/adapters/ent   # optional, for Ent users
+go get github.com/gopackx/go-audit/adapters/gorm@v1.1.2  # optional, for GORM users
+go get github.com/gopackx/go-audit/adapters/bun@v1.1.0   # optional, for Bun users
+go get github.com/gopackx/go-audit/adapters/ent@v1.1.0   # optional, for Ent users
 ```
 
-> **Adapter versions.** Adapter sub-modules are not (yet) released under
-> their own semver tags, so `go get .../adapters/gorm@v1.0.0` will fail.
-> Pin to the latest commit on `master` via a pseudo-version instead:
+> **Adapter versions.** Each adapter is its own Go module and is tagged
+> independently of the core as `adapters/<name>/vX.Y.Z` (e.g.
+> `adapters/gorm/v1.1.2`), so adapter version numbers do not track the
+> core's. The MCP server is tagged the same way as `mcp/vX.Y.Z`. Current
+> releases:
 >
 > ```bash
-> go get github.com/gopackx/go-audit/adapters/gorm@master
-> # go.mod will rewrite this to e.g. v0.0.0-20260101120000-abcdef012345
+> go get github.com/gopackx/go-audit/adapters/gorm@v1.1.2
+> go get github.com/gopackx/go-audit/adapters/bun@v1.1.0
+> go get github.com/gopackx/go-audit/adapters/ent@v1.1.0
 > ```
 
 ## Quick start (GORM + SQLite)

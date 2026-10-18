@@ -2,8 +2,8 @@ package main
 
 import (
 	// Pure-Go drivers so the MCP server compiles without cgo.
-	_ "github.com/jackc/pgx/v5/stdlib" // postgres
 	_ "github.com/go-sql-driver/mysql" // mysql
+	_ "github.com/jackc/pgx/v5/stdlib" // postgres
 	_ "modernc.org/sqlite"             // sqlite
 
 	audit "github.com/gopackx/go-audit"
