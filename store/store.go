@@ -19,6 +19,12 @@ type Store interface {
 	QueryAPILogs(ctx context.Context, table string, filter entry.APIFilter) ([]entry.AuditAPILog, error)
 	// Purge deletes rows from table whose created_at is strictly older than
 	// before, returning the count removed. Used by retention tooling.
+	//
+	// Time contract: created_at is always stored in UTC. Implementations must
+	// compare before, DataFilter.DateFrom/DateTo and APIFilter.DateFrom/DateTo
+	// as instants, so callers may pass a time.Time in any zone. The SQL store
+	// normalises every time parameter to UTC before binding it, which matters
+	// on SQLite where time values are TEXT and compared as strings.
 	Purge(ctx context.Context, table string, before time.Time) (int64, error)
 	Exec(ctx context.Context, stmt string) error
 }

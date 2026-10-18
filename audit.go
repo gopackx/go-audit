@@ -36,10 +36,13 @@ type Auditor interface {
 	AutoMigrate(ctx context.Context) error
 	// Purge deletes data and API audit rows older than before. Returns per-
 	// table counts; either table may be skipped when its config is disabled.
+	// before may be in any zone: created_at is stored in UTC and the cutoff is
+	// normalised to UTC before it is compared.
 	Purge(ctx context.Context, before time.Time) (PurgeResult, error)
 	// Snapshot reconstructs the state of an entity at a point in time by
 	// replaying all audit logs up to `at`. Returns nil if the entity did not
-	// exist (or was deleted) at that time.
+	// exist (or was deleted) at that time. `at` may be in any zone; it is
+	// compared against created_at (stored in UTC) as an instant.
 	Snapshot(ctx context.Context, entityType, entityID string, at time.Time) (map[string]any, error)
 	// Restore reconstructs entity state at time `at` via Snapshot, records a
 	// "restore" audit entry (old=current state, new=target state), and returns

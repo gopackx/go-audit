@@ -181,6 +181,11 @@ type PurgeResult struct {
 
 - Only enabled tables are purged. If `APIAudit.Enabled` is `false`, `APILogs` will be `0`.
 - The purge deletes rows where `created_at < before` (strictly older).
+- `created_at` is stored in UTC and `before` may be in any zone. The store
+  converts the cutoff to UTC before comparing, so `time.Now().AddDate(0, 0, -90)`
+  in a local zone keeps exactly the last 90 days. On SQLite this is what makes
+  the comparison correct at all: times are stored as text, and a cutoff bound
+  in another zone would compare by its zone offset rather than by instant.
 
 ### Scheduling Purge
 

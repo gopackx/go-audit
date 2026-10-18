@@ -27,4 +27,5 @@ func TestPostgres(t *testing.T) {
 	}
 
 	runDialectSuite(t, db, audit.PostgreSQL)
+	runTimeZoneSuite(t, db, audit.PostgreSQL)
 }

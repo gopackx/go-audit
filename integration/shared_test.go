@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/gopackx/go-audit"
 )
@@ -159,4 +160,111 @@ func resetTables(t *testing.T, db *sql.DB, dialect audit.DialectType) {
 			t.Fatalf("reset (%s): %v", stmt, err)
 		}
 	}
+}
+
+// runTimeZoneSuite checks that retention and date filters compare created_at
+// (stored in UTC) correctly no matter which zone the caller's time.Time is
+// in. SQLite stores time.Time as TEXT and compares strings, so a non-UTC
+// `before` used to delete every fresh row (go-audit issue: Purge with
+// now-1h in UTC+7 purged everything).
+func runTimeZoneSuite(t *testing.T, db *sql.DB, dialect audit.DialectType) {
+	t.Helper()
+
+	ctx := context.Background()
+	zone := time.FixedZone("UTC+7", 7*3600)
+
+	seed := func(t *testing.T) audit.Auditor {
+		t.Helper()
+		resetTables(t, db, dialect)
+		a := newAuditorForDialect(t, db, dialect)
+		if err := a.RecordDataChange(ctx, audit.DataEntry{
+			EntityType: "products", EntityID: "tz-1", Action: audit.ActionCreate,
+			NewValues: map[string]any{"name": "Widget"},
+		}); err != nil {
+			t.Fatalf("record data: %v", err)
+		}
+		if err := a.API().Record(ctx, audit.APIEntry{
+			Service: "bca", Endpoint: "/tz", Method: "GET", StatusCode: 200,
+		}); err != nil {
+			t.Fatalf("record api: %v", err)
+		}
+		return a
+	}
+
+	t.Run("PurgeKeepsFreshRowsWithNonUTCCutoff", func(t *testing.T) {
+		a := seed(t)
+		res, err := a.Purge(ctx, time.Now().In(zone).Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("purge: %v", err)
+		}
+		if res.DataLogs != 0 || res.APILogs != 0 {
+			t.Fatalf("fresh rows purged with cutoff one hour in the past: data=%d api=%d",
+				res.DataLogs, res.APILogs)
+		}
+	})
+
+	t.Run("PurgeDeletesRowsWithFutureNonUTCCutoff", func(t *testing.T) {
+		a := seed(t)
+		res, err := a.Purge(ctx, time.Now().In(zone).Add(time.Hour))
+		if err != nil {
+			t.Fatalf("purge: %v", err)
+		}
+		if res.DataLogs != 1 || res.APILogs != 1 {
+			t.Fatalf("expected 1+1 rows purged with cutoff in the future, got data=%d api=%d",
+				res.DataLogs, res.APILogs)
+		}
+	})
+
+	t.Run("DateRangeInNonUTCZone", func(t *testing.T) {
+		a := seed(t)
+		past := time.Now().In(zone).Add(-time.Hour)
+		future := time.Now().In(zone).Add(time.Hour)
+
+		cases := []struct {
+			name string
+			f    audit.DataFilter
+			want int
+		}{
+			{"from past", audit.DataFilter{DateFrom: past}, 1},
+			{"to future", audit.DataFilter{DateTo: future}, 1},
+			{"between", audit.DataFilter{DateFrom: past, DateTo: future}, 1},
+			{"from future", audit.DataFilter{DateFrom: future}, 0},
+			{"to past", audit.DataFilter{DateTo: past}, 0},
+		}
+		for _, tc := range cases {
+			tc.f.EntityType = "products"
+			logs, err := a.Query(ctx, tc.f)
+			if err != nil {
+				t.Fatalf("%s: query: %v", tc.name, err)
+			}
+			if len(logs) != tc.want {
+				t.Fatalf("%s: want %d data logs, got %d", tc.name, tc.want, len(logs))
+			}
+			api, err := a.API().Query(ctx, audit.APIFilter{DateFrom: tc.f.DateFrom, DateTo: tc.f.DateTo})
+			if err != nil {
+				t.Fatalf("%s: api query: %v", tc.name, err)
+			}
+			if len(api) != tc.want {
+				t.Fatalf("%s: want %d api logs, got %d", tc.name, tc.want, len(api))
+			}
+		}
+	})
+
+	t.Run("SnapshotInNonUTCZone", func(t *testing.T) {
+		a := seed(t)
+		state, err := a.Snapshot(ctx, "products", "tz-1", time.Now().In(zone).Add(time.Hour))
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if state == nil || state["name"] != "Widget" {
+			t.Fatalf("snapshot at a future non-UTC time should replay the create, got %v", state)
+		}
+		state, err = a.Snapshot(ctx, "products", "tz-1", time.Now().In(zone).Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if state != nil {
+			t.Fatalf("snapshot an hour before the create should be empty, got %v", state)
+		}
+	})
 }

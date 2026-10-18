@@ -37,6 +37,15 @@ All fields are optional. Only non-zero fields are included in the WHERE clause.
 
 Results are ordered by `created_at DESC` (newest first).
 
+#### Time zones
+
+`created_at` is always stored in UTC. `DateFrom` and `DateTo` may be passed in
+any zone (`time.Now()` in a local zone is fine): the store converts them to UTC
+before comparing, so the filter selects the same rows regardless of the zone.
+This also matters on SQLite, where times are stored as text and compared as
+strings; a non-UTC bound would otherwise sort relative to the UTC rows by its
+zone offset. The same rule applies to `APIFilter`, `Purge` and `Snapshot`.
+
 ### Examples
 
 ```go
@@ -90,8 +99,8 @@ All fields are optional.
 | `StatusCode` | `int` | Filter by HTTP status code |
 | `UserID` | `string` | Filter by user |
 | `TransactionID` | `string` | Filter by transaction ID |
-| `DateFrom` | `time.Time` | Only logs created at or after this time |
-| `DateTo` | `time.Time` | Only logs created at or before this time |
+| `DateFrom` | `time.Time` | Only logs created at or after this time (any zone, see above) |
+| `DateTo` | `time.Time` | Only logs created at or before this time (any zone, see above) |
 | `Limit` | `int` | Max rows to return |
 | `Offset` | `int` | Skip rows for pagination |
 

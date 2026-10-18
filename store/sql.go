@@ -50,7 +50,7 @@ func (s *sqlStore) SaveDataLog(ctx context.Context, table string, log entry.Audi
 		log.UserID, nullableString(log.UserType),
 		nullableJSON(log.Metadata),
 		nullableString(log.TransactionID),
-		log.CreatedAt,
+		utc(log.CreatedAt),
 	)
 	return err
 }
@@ -76,7 +76,7 @@ func (s *sqlStore) SaveAPILog(ctx context.Context, table string, log entry.Audit
 		nullableString(log.UserID),
 		nullableJSON(log.Metadata),
 		nullableString(log.TransactionID),
-		log.CreatedAt,
+		utc(log.CreatedAt),
 	)
 	return err
 }
@@ -106,10 +106,10 @@ func (s *sqlStore) QueryDataLogs(ctx context.Context, table string, f entry.Data
 		add("transaction_id = ?", f.TransactionID)
 	}
 	if !f.DateFrom.IsZero() {
-		add("created_at >= ?", f.DateFrom)
+		add("created_at >= ?", utc(f.DateFrom))
 	}
 	if !f.DateTo.IsZero() {
-		add("created_at <= ?", f.DateTo)
+		add("created_at <= ?", utc(f.DateTo))
 	}
 
 	q := fmt.Sprintf("SELECT id, entity_type, entity_id, action, old_values, new_values, user_id, user_type, metadata, transaction_id, created_at FROM %s", table)
@@ -179,10 +179,10 @@ func (s *sqlStore) QueryAPILogs(ctx context.Context, table string, f entry.APIFi
 		add("transaction_id = ?", f.TransactionID)
 	}
 	if !f.DateFrom.IsZero() {
-		add("created_at >= ?", f.DateFrom)
+		add("created_at >= ?", utc(f.DateFrom))
 	}
 	if !f.DateTo.IsZero() {
-		add("created_at <= ?", f.DateTo)
+		add("created_at <= ?", utc(f.DateTo))
 	}
 
 	q := fmt.Sprintf("SELECT id, service, endpoint, method, status_code, request_headers, response_headers, request_body, response_body, duration_ms, error_message, user_id, metadata, transaction_id, created_at FROM %s", table)
@@ -241,12 +241,15 @@ func (s *sqlStore) QueryAPILogs(ctx context.Context, table string, f entry.APIFi
 	return out, rows.Err()
 }
 
+// Purge deletes rows whose created_at is strictly older than before. The
+// cutoff is normalised to UTC first (see utc) so the comparison is correct on
+// every dialect regardless of the zone the caller used.
 func (s *sqlStore) Purge(ctx context.Context, table string, before time.Time) (int64, error) {
 	if !identRE.MatchString(table) {
 		return 0, fmt.Errorf("audit: invalid table %q", table)
 	}
 	stmt := fmt.Sprintf("DELETE FROM %s WHERE created_at < %s", table, s.d.Placeholder(1))
-	res, err := s.db.ExecContext(ctx, stmt, before)
+	res, err := s.db.ExecContext(ctx, stmt, utc(before))
 	if err != nil {
 		return 0, err
 	}
@@ -255,6 +258,22 @@ func (s *sqlStore) Purge(ctx context.Context, table string, before time.Time) (i
 		return 0, nil
 	}
 	return n, nil
+}
+
+// utc normalises a time.Time to UTC before it is bound as a query parameter.
+//
+// created_at is always written in UTC. PostgreSQL (TIMESTAMPTZ) and MySQL
+// (TIMESTAMP) compare instants, so the zone of a bound parameter does not
+// matter there. SQLite has no time type: database/sql drivers bind time.Time
+// as TEXT including the zone offset, and SQLite then compares the strings
+// lexicographically. A cutoff in UTC+7 ("... 20:00:00+07:00") sorts after
+// every UTC row ("... 14:00:00+00:00") written in the same hour, so a
+// retention purge with before = now-1h would delete fresh rows, and date
+// filters would miss or include rows by the zone offset. Converting every
+// time parameter to UTC keeps the stored and bound representations in the
+// same zone so the string comparison matches the instant comparison.
+func utc(t time.Time) time.Time {
+	return t.UTC()
 }
 
 func nullableJSON(b []byte) any {

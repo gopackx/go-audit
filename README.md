@@ -219,6 +219,9 @@ res, err := auditor.Purge(ctx, time.Now().AddDate(0, 0, -90))
 // res.DataLogs and res.APILogs — rows deleted per table
 ```
 
+`created_at` is stored in UTC; `before` (and `DateFrom`/`DateTo` on filters)
+may be passed in any zone and is normalised to UTC before comparison.
+
 ## Configuration
 
 ```go

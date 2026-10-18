@@ -43,6 +43,11 @@ type AuditAPILog struct {
 }
 
 // DataFilter narrows a query over audit_logs.
+//
+// DateFrom and DateTo are compared against created_at, which is stored in
+// UTC. They may be given in any zone; the store converts them to UTC before
+// comparing, so a filter built from time.Now() in a local zone selects the
+// same rows as one built in UTC.
 type DataFilter struct {
 	EntityType    string
 	EntityID      string
@@ -55,7 +60,8 @@ type DataFilter struct {
 	Offset        int
 }
 
-// APIFilter narrows a query over audit_api_logs.
+// APIFilter narrows a query over audit_api_logs. DateFrom and DateTo follow
+// the same UTC contract as DataFilter.
 type APIFilter struct {
 	Service       string
 	StatusCode    int

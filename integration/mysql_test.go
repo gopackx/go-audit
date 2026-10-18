@@ -27,4 +27,5 @@ func TestMySQL(t *testing.T) {
 	}
 
 	runDialectSuite(t, db, audit.MySQL)
+	runTimeZoneSuite(t, db, audit.MySQL)
 }

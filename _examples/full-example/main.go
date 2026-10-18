@@ -164,7 +164,9 @@ func main() {
 
 	// -----------------------------------------------------------------------
 	// 9. Purge — retention cleanup (delete logs older than 1 hour ago; none
-	// will match since we just created them, but this shows the API)
+	// will match since we just created them, but this shows the API). The
+	// cutoff is in the local zone on purpose: created_at is stored in UTC and
+	// the store normalises the cutoff, so this must report 0 on every dialect.
 	// -----------------------------------------------------------------------
 	fmt.Println("\n=== Purge (retention) ===")
 	res, err := auditor.Purge(ctx, time.Now().Add(-1*time.Hour))

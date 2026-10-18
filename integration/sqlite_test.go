@@ -16,4 +16,5 @@ func TestSQLite(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	runDialectSuite(t, db, audit.SQLite)
+	runTimeZoneSuite(t, db, audit.SQLite)
 }
