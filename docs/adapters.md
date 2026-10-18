@@ -24,10 +24,10 @@ The GORM adapter registers four callbacks:
 
 | Callback | When | What It Does |
 |----------|------|-------------|
-| `beforeUpdate` | Before UPDATE | Snapshots old values via `SELECT` with the same WHERE clause |
+| `beforeUpdate` | Before UPDATE | Snapshots old values via a `SELECT` that targets the same rows as the write (its WHERE clause AND the model's primary key) |
 | `afterCreate` | After INSERT | Records `action: "create"` with all field values |
 | `afterUpdate` | After UPDATE | Diffs old vs new, records `action: "update"` with changed fields only |
-| `beforeDelete` | Before DELETE | Snapshots old values via `SELECT` |
+| `beforeDelete` | Before DELETE | Snapshots old values the same way as `beforeUpdate` |
 | `afterDelete` | After DELETE | Records `action: "delete"` (or `"soft_delete"` for soft deletes) |
 
 ### Soft Deletes
@@ -52,7 +52,16 @@ Bulk updates/deletes produce one audit log per affected row, all sharing the sam
 ```go
 db.Model(&Product{}).Where("price < ?", 100).Updates(Product{Status: "archived"})
 // -> N audit logs, one per row, same transaction_id
+
+db.Where("price < ?", 100).Delete(&Product{})
+// -> N audit logs (action "delete" or "soft_delete"), one per row
 ```
+
+A WHERE-driven bulk write carries no primary key on its model, so the affected rows are identified by the pre-write snapshot: the `SELECT` runs with the same WHERE and each row it returns becomes one entry, with `entity_id` = that row's primary key, `old_values` = the snapshot, and `new_values` = the snapshot with the assigned columns applied (`null` for a hard delete, `{"deleted_at": ...}` for a soft delete).
+
+With `DataAudit.SkipOldValues: true` no snapshot is taken, so such bulk writes **cannot be attributed per row and are not audited**. Writes that target rows by primary key (`db.Model(&p).Update(...)`, `db.Save(&p)`, `db.Delete(&p)`, `db.Delete(&rows)`) are still audited per row without a snapshot.
+
+A write with neither a WHERE clause nor a primary key is rejected by GORM (`ErrMissingWhereClause`) and no snapshot is taken. With `AllowGlobalUpdate` the write touches the whole table, so the snapshot does too.
 
 ### Entity Type
 

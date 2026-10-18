@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 
 	"github.com/gopackx/go-audit"
@@ -140,7 +141,7 @@ func (c *callbacks) beforeUpdate(db *gorm.DB) {
 		return
 	}
 	// Snapshot old values for each affected row so afterUpdate can diff.
-	old, err := snapshotRows(db)
+	old, err := snapshotRows(db, audit.ActionUpdate)
 	if err != nil {
 		_ = db.AddError(fmt.Errorf("go-audit: snapshot before update: %w", err))
 		return
@@ -160,7 +161,7 @@ func (c *callbacks) beforeDelete(db *gorm.DB) {
 	if c.auditor.Config().DataAudit.SkipOldValues {
 		return
 	}
-	old, err := snapshotRows(db)
+	old, err := snapshotRows(db, audit.ActionDelete)
 	if err != nil {
 		_ = db.AddError(fmt.Errorf("go-audit: snapshot before delete: %w", err))
 		return
@@ -181,10 +182,22 @@ func (c *callbacks) afterDelete(db *gorm.DB) {
 }
 
 // recordEach emits one audit entry per affected row.
+//
+// For create, and for update/delete of rows whose primary key is set on the
+// model (db.Model(&p).Update, db.Save(&p), db.Delete(&p), db.Delete(&rows)),
+// the rows come from Statement.ReflectValue.
+//
+// A bulk update/delete driven by a custom WHERE — e.g.
+// db.Model(&T{}).Where("price >= ?", 30).Update("price", 1) — carries a single
+// zero-value model in ReflectValue that identifies no row. Auditing it would
+// produce one bogus entry with entity_id "0". Instead the affected rows are
+// taken from the pre-write snapshot (beforeUpdate/beforeDelete), which ran the
+// same WHERE and is keyed by real primary key: one entry per snapshotted row.
 func (c *callbacks) recordEach(db *gorm.DB, action string, old map[string]map[string]any) {
 	if db.Error != nil || db.Statement.Schema == nil {
 		return
 	}
+	sch := db.Statement.Schema
 	entityType := db.Statement.Table
 
 	txID := audit.TransactionIDFromContext(db.Statement.Context)
@@ -215,75 +228,168 @@ func (c *callbacks) recordEach(db *gorm.DB, action string, old map[string]map[st
 		}
 	}
 
-	iterateRows(db, func(rv reflect.Value) {
-		entityID := primaryKeyString(db.Statement.Schema, rv)
-		if existingPK != nil {
-			if _, reSaved := existingPK[entityID]; reSaved {
-				return
-			}
-		}
+	record := func(entityID string, oldVals, newVals map[string]any) {
 		seenKey := entityType + "\x00" + entityID
 		if _, dup := seen[seenKey]; dup {
 			return
 		}
 		seen[seenKey] = struct{}{}
-		values := fieldValues(db.Statement.Schema, rv)
-
-		var oldVals map[string]any
-		if old != nil {
-			oldVals = old[entityID]
-		}
-
 		entry := audit.DataEntry{
 			EntityType:    entityType,
 			EntityID:      entityID,
 			Action:        action,
 			OldValues:     oldVals,
-			NewValues:     values,
+			NewValues:     newVals,
 			TransactionID: txID,
-		}
-		switch action {
-		case audit.ActionCreate:
-			entry.OldValues = nil
-		case audit.ActionDelete:
-			// Hard delete: new state is empty; old state is what we captured.
-			if oldVals == nil {
-				entry.OldValues = values
-			}
-			entry.NewValues = nil
-		case audit.ActionSoftDelete:
-			// Soft delete: capture deleted_at in new_values to show what changed.
-			if oldVals == nil {
-				entry.OldValues = values
-			}
-			entry.NewValues = softDeleteNewValues(db.Statement.Schema, rv)
 		}
 		if err := c.auditor.RecordDataChange(db.Statement.Context, entry); err != nil {
 			_ = db.AddError(fmt.Errorf("go-audit: record %s: %w", action, err))
 		}
+	}
+
+	// For update/delete, a row with an all-zero primary key does not identify
+	// a database row: it is the filter-less model of a WHERE-driven bulk
+	// write. Remember it (its fields carry the SET columns / deleted_at GORM
+	// assigned) and attribute the write via the snapshot below. Models with no
+	// primary key at all keep the legacy per-row behaviour.
+	identifiesByPK := action != audit.ActionCreate && len(sch.PrimaryFields) > 0
+	var (
+		bulkModel reflect.Value
+		sawBulk   bool
+	)
+
+	iterateRows(db, func(rv reflect.Value) {
+		if identifiesByPK && pkIsZero(sch, rv) {
+			if !sawBulk {
+				bulkModel, sawBulk = rv, true
+			}
+			return
+		}
+		entityID := primaryKeyString(sch, rv)
+		if existingPK != nil {
+			if _, reSaved := existingPK[entityID]; reSaved {
+				return
+			}
+		}
+		values := fieldValues(sch, rv)
+
+		var oldVals map[string]any
+		if old != nil {
+			oldVals = old[entityID]
+		}
+		newVals := values
+		switch action {
+		case audit.ActionCreate:
+			oldVals = nil
+		case audit.ActionDelete:
+			// Hard delete: new state is empty; old state is what we captured.
+			if oldVals == nil {
+				oldVals = values
+			}
+			newVals = nil
+		case audit.ActionSoftDelete:
+			// Soft delete: capture deleted_at in new_values to show what changed.
+			if oldVals == nil {
+				oldVals = values
+			}
+			newVals = softDeleteNewValues(sch, rv)
+		}
+		record(entityID, oldVals, newVals)
 	})
+
+	// WHERE-driven bulk update/delete: one entry per row the pre-write
+	// snapshot found (the snapshot used the same WHERE as the write). Rows
+	// already recorded above via their own PK are skipped by the seen set.
+	//
+	// With DataAudit.SkipOldValues there is no snapshot, and the model carries
+	// no PK, so nothing identifiable is left to audit: such a bulk write emits
+	// no entries rather than a misleading one with entity_id "0" or "".
+	if !sawBulk || len(old) == 0 {
+		return
+	}
+	// For update, the zero-value model's non-zero fields are exactly the
+	// columns GORM assigned (ConvertToAssignments writes each SET value back
+	// onto ReflectValue), e.g. {"price": 1, "updated_at": ...}. Overlaying them
+	// on a copy of each snapshot row gives that row's post-write state.
+	var assigned map[string]any
+	if action == audit.ActionUpdate {
+		assigned = fieldValues(sch, bulkModel)
+	}
+	ids := make([]string, 0, len(old))
+	for id := range old {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids) // deterministic emission order
+	for _, id := range ids {
+		oldRow := old[id]
+		var newVals map[string]any
+		switch action {
+		case audit.ActionUpdate:
+			newVals = make(map[string]any, len(oldRow)+len(assigned))
+			for k, v := range oldRow {
+				newVals[k] = v
+			}
+			for k, v := range assigned {
+				newVals[k] = v
+			}
+		case audit.ActionSoftDelete:
+			newVals = softDeleteNewValues(sch, bulkModel)
+		}
+		record(id, oldRow, newVals)
+	}
 }
 
-// snapshotRows issues a SELECT with the statement's current WHERE clause to
-// capture the pre-change state of each affected row, keyed by primary key.
-func snapshotRows(db *gorm.DB) (map[string]map[string]any, error) {
-	if db.Statement.Schema == nil {
+// snapshotRows issues a SELECT that targets exactly the rows the pending
+// UPDATE/DELETE will touch, capturing their pre-change state keyed by primary
+// key.
+//
+// The predicate is the statement's WHERE clause AND the primary-key predicate
+// derived from the model, which is built here by hand: GORM only adds that PK
+// predicate inside the gorm:update / gorm:delete callbacks themselves
+// (callbacks/update.go ConvertToAssignments, callbacks/delete.go Delete), i.e.
+// after this before-callback has run. Copying Statement.Clauses["WHERE"] alone
+// therefore misses it for db.Model(&p).Update(...), db.Save(&p) and
+// db.Delete(&p), and the snapshot degenerates into a full-table SELECT. Like
+// GORM, the PK predicate is ANDed with any user WHERE, so the snapshot sees the
+// same rows the write will.
+//
+// With neither a WHERE nor a non-zero primary key GORM refuses the write with
+// ErrMissingWhereClause, so no snapshot is taken. The exception is a session
+// with AllowGlobalUpdate, where the write really does touch every row and a
+// full-table snapshot is the correct pre-image.
+func snapshotRows(db *gorm.DB, action string) (map[string]map[string]any, error) {
+	stmt := db.Statement
+	if stmt.Schema == nil {
 		return nil, nil
 	}
-	sess := db.Session(&gorm.Session{NewDB: true, Context: db.Statement.Context})
-	// Use Table+Clauses to mirror the caller's filter.
-	rowsModel := reflect.New(reflect.SliceOf(db.Statement.Schema.ModelType)).Interface()
-	q := sess.Table(db.Statement.Table)
+	var exprs []clause.Expression
 	// Re-apply the caller's WHERE conditions on the fresh session. Passing
 	// the original *clause.Clause back into q.Clauses(...) makes GORM emit
 	// "WHERE WHERE ..." (Postgres 42601) because the Clause carries its own
 	// "WHERE" name and the builder also prepends one. Extract the
-	// underlying clause.Where expression and wrap it in a fresh value so the
-	// builder writes a single WHERE.
-	if src, ok := db.Statement.Clauses["WHERE"]; ok {
-		if w, ok := src.Expression.(clause.Where); ok && len(w.Exprs) > 0 {
-			q = q.Clauses(clause.Where{Exprs: w.Exprs})
+	// underlying clause.Where expressions and wrap them in a fresh value so
+	// the builder writes a single WHERE.
+	if src, ok := stmt.Clauses["WHERE"]; ok {
+		if w, ok := src.Expression.(clause.Where); ok {
+			exprs = append(exprs, w.Exprs...)
 		}
+	}
+	exprs = append(exprs, primaryKeyConditions(stmt, action)...)
+	if len(exprs) == 0 && !db.AllowGlobalUpdate {
+		return nil, nil
+	}
+
+	sess := db.Session(&gorm.Session{NewDB: true, Context: stmt.Context})
+	// NewDB drops Unscoped. Without it the snapshot for
+	// db.Unscoped().Delete(&alreadySoftDeleted) would add "deleted_at IS NULL"
+	// and miss the very row being hard-deleted.
+	if stmt.Unscoped {
+		sess = sess.Unscoped()
+	}
+	rowsModel := reflect.New(reflect.SliceOf(stmt.Schema.ModelType)).Interface()
+	q := sess.Table(stmt.Table)
+	if len(exprs) > 0 {
+		q = q.Clauses(clause.Where{Exprs: exprs})
 	}
 	if err := q.Find(rowsModel).Error; err != nil {
 		return nil, err
@@ -292,10 +398,76 @@ func snapshotRows(db *gorm.DB) (map[string]map[string]any, error) {
 	rv := reflect.ValueOf(rowsModel).Elem()
 	for i := 0; i < rv.Len(); i++ {
 		row := rv.Index(i)
-		id := primaryKeyString(db.Statement.Schema, row)
-		out[id] = fieldValues(db.Statement.Schema, row)
+		id := primaryKeyString(stmt.Schema, row)
+		out[id] = fieldValues(stmt.Schema, row)
 	}
 	return out, nil
+}
+
+// primaryKeyConditions builds the primary-key predicate GORM will add to the
+// pending UPDATE/DELETE, from the same values GORM uses:
+//
+//   - update: the model value (callbacks.SetupUpdateReflectValue switches
+//     ReflectValue to Statement.Model when Dest differs, e.g. for
+//     db.Model(&p).Update("col", v) where Dest is a map);
+//   - delete: ReflectValue, plus Statement.Model when it differs from Dest.
+//
+// A struct yields one Eq per non-zero PK field; a slice/array yields an IN over
+// the non-zero PK tuples (schema.GetIdentityFieldValuesMap + ToQueryValues,
+// exactly as GORM does, which also covers compound keys). Zero PKs contribute
+// nothing.
+func primaryKeyConditions(stmt *gorm.Statement, action string) []clause.Expression {
+	s := stmt.Schema
+	if len(s.PrimaryFields) == 0 {
+		return nil
+	}
+	var targets []reflect.Value
+	switch action {
+	case audit.ActionUpdate:
+		rv := stmt.ReflectValue
+		if stmt.Model != nil && (!rv.CanAddr() || stmt.Model != stmt.Dest) {
+			rv = reflect.ValueOf(stmt.Model)
+		}
+		targets = append(targets, rv)
+	case audit.ActionDelete:
+		targets = append(targets, stmt.ReflectValue)
+		if stmt.Model != nil && stmt.Dest != stmt.Model && stmt.ReflectValue.CanAddr() {
+			targets = append(targets, reflect.ValueOf(stmt.Model))
+		}
+	}
+
+	var exprs []clause.Expression
+	for _, rv := range targets {
+		for rv.IsValid() && (rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface) {
+			if rv.IsNil() {
+				rv = reflect.Value{}
+				break
+			}
+			rv = rv.Elem()
+		}
+		if !rv.IsValid() {
+			continue
+		}
+		switch rv.Kind() {
+		case reflect.Struct:
+			for _, f := range s.PrimaryFields {
+				if v, zero := f.ValueOf(stmt.Context, rv); !zero {
+					exprs = append(exprs, clause.Eq{
+						Column: clause.Column{Table: stmt.Table, Name: f.DBName},
+						Value:  v,
+					})
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			_, values := schema.GetIdentityFieldValuesMap(stmt.Context, rv, s.PrimaryFields)
+			if len(values) == 0 {
+				continue
+			}
+			column, queryValues := schema.ToQueryValues(stmt.Table, s.PrimaryFieldDBNames, values)
+			exprs = append(exprs, clause.IN{Column: column, Values: queryValues})
+		}
+	}
+	return exprs
 }
 
 // seenSet returns the dedup set in scope for the current operation. Inside a
@@ -427,7 +599,10 @@ func fieldValues(s *schema.Schema, rv reflect.Value) map[string]any {
 // isSoftDelete reports whether the current delete operation is a GORM soft
 // delete (UPDATE SET deleted_at) rather than a physical DELETE.
 func isSoftDelete(db *gorm.DB) bool {
-	if db.Statement.Schema == nil {
+	// Unscoped always issues a physical DELETE (GORM's soft-delete clause is
+	// skipped), even when the struct already carries a non-zero deleted_at
+	// from an earlier soft delete — e.g. db.Unscoped().Delete(&softDeleted).
+	if db.Statement.Schema == nil || db.Statement.Unscoped {
 		return false
 	}
 	for _, f := range db.Statement.Schema.Fields {
